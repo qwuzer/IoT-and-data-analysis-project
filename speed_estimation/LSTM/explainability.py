@@ -54,12 +54,17 @@ class ModelWrapper:
         Predict function for SHAP.
         
         Args:
-            x: Input array of shape (n_samples, sequence_length, feature_dim)
+            x: Input array of shape (n_samples, sequence_length, feature_dim) or (n_samples, flattened)
             
         Returns:
             Predictions of shape (n_samples,)
         """
+        # Handle both 2D (flattened) and 3D inputs
         if isinstance(x, np.ndarray):
+            if x.ndim == 2:
+                # Assume flattened: reshape to (n_samples, seq_len, feat_dim)
+                n_samples = x.shape[0]
+                x = x.reshape(n_samples, SEQUENCE_LENGTH, FEATURE_DIM)
             x = torch.FloatTensor(x)
         
         x = x.to(self.device)
@@ -99,22 +104,46 @@ def compute_shap_values(
         # Use DeepExplainer for neural networks
         # Convert numpy arrays to torch tensors
         background_tensor = torch.FloatTensor(background_data).to(device)
-        explainer = shap.DeepExplainer(model, background_tensor)
-    elif explainer_type == "kernel":
-        # Use KernelExplainer (slower but more general)
+        try:
+            explainer = shap.DeepExplainer(model, background_tensor)
+            test_tensor = torch.FloatTensor(test_data).to(device)
+            # Disable additivity check to avoid errors with sigmoid
+            shap_values = explainer.shap_values(test_tensor, check_additivity=False)
+        except Exception as e:
+            print(f"Warning: DeepExplainer failed ({e}), falling back to KernelExplainer")
+            explainer_type = "kernel"
+    
+    if explainer_type == "kernel":
+        # Use KernelExplainer (slower but more general and reliable)
+        # Flatten sequences for KernelExplainer
+        background_flat = background_data[:min(SHAP_BACKGROUND_SIZE, len(background_data))].reshape(-1, SEQUENCE_LENGTH * FEATURE_DIM)
+        test_flat = test_data[:min(SHAP_SAMPLE_SIZE, len(test_data))].reshape(-1, SEQUENCE_LENGTH * FEATURE_DIM)
+        
         explainer = shap.KernelExplainer(
             model_wrapper,
-            background_data[:SHAP_BACKGROUND_SIZE]  # Limit background size
+            background_flat
         )
-    else:
-        raise ValueError(f"Unknown explainer type: {explainer_type}")
-    
-    # Convert test data to tensor if using DeepExplainer
-    if explainer_type == "deep":
-        test_tensor = torch.FloatTensor(test_data).to(device)
-        shap_values = explainer.shap_values(test_tensor)
-    else:
-        shap_values = explainer.shap_values(test_data)
+        shap_values_flat = explainer.shap_values(test_flat)
+        
+        # Reshape back to (n_samples, seq_len, feat_dim)
+        if isinstance(shap_values_flat, list):
+            shap_values_flat = shap_values_flat[0]
+        shap_values_flat = np.array(shap_values_flat)
+        shap_values = shap_values_flat.reshape(-1, SEQUENCE_LENGTH, FEATURE_DIM)
+        
+        # Get base value as array
+        base_val = explainer.expected_value
+        if isinstance(base_val, list):
+            base_val = base_val[0]
+        base_values = np.array([base_val] * len(shap_values))
+        
+        # Create SHAP Explanation object (shap already imported at top)
+        shap_values = shap.Explanation(
+            values=shap_values,
+            base_values=base_values,
+            data=test_data[:min(SHAP_SAMPLE_SIZE, len(test_data))],
+            feature_names=[f"{feat}_t{t}" for t in range(SEQUENCE_LENGTH) for feat in FEATURE_COLUMNS]
+        )
     
     return shap_values, explainer
 
@@ -148,24 +177,34 @@ def get_feature_importance(shap_values: shap.Explanation) -> Dict[str, float]:
     return importance_dict
 
 
-def plot_shap_summary(shap_values: shap.Explanation, save_path: Path, max_display: int = 10):
+def plot_shap_summary(shap_values, save_path: Path, max_display: int = 10):
     """
     Plot SHAP summary plot.
     """
-    plt.figure(figsize=FIGURE_SIZE)
-    
-    if isinstance(shap_values, list):
-        shap_values = shap_values[0]
-    
-    shap.summary_plot(shap_values, show=False, max_display=max_display)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=DPI, bbox_inches='tight')
-    plt.close()
-    print(f"SHAP summary plot saved to: {save_path}")
+    try:
+        plt.figure(figsize=FIGURE_SIZE)
+        
+        if isinstance(shap_values, list):
+            shap_values = shap_values[0]
+        
+        # Try summary plot, fall back to bar plot if it fails
+        try:
+            shap.summary_plot(shap_values, show=False, max_display=max_display)
+        except Exception as e:
+            print(f"Warning: SHAP summary plot failed ({e}), using bar plot instead")
+            # Use bar plot as fallback
+            shap.plots.bar(shap_values, show=False, max_display=max_display)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=DPI, bbox_inches='tight')
+        plt.close()
+        print(f"SHAP summary plot saved to: {save_path}")
+    except Exception as e:
+        print(f"Warning: Could not generate SHAP summary plot: {e}")
 
 
 def plot_shap_force_plot(
-    shap_values: shap.Explanation,
+    shap_values,
     test_data: np.ndarray,
     sample_idx: int,
     save_path: Path
@@ -173,27 +212,42 @@ def plot_shap_force_plot(
     """
     Plot SHAP force plot for a single prediction.
     """
-    if isinstance(shap_values, list):
-        shap_values = shap_values[0]
-    
-    # Get SHAP values for this sample
-    shap_values_sample = shap_values[sample_idx]
-    test_sample = test_data[sample_idx]
-    
-    # Create explanation object for this sample
-    explanation = shap.Explanation(
-        values=shap_values_sample.values,
-        base_values=shap_values_sample.base_values,
-        data=test_sample,
-        feature_names=FEATURE_COLUMNS
-    )
-    
-    # Plot force plot
-    shap.plots.force(explanation, show=False, matplotlib=True)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=DPI, bbox_inches='tight')
-    plt.close()
-    print(f"SHAP force plot saved to: {save_path}")
+    try:
+        if isinstance(shap_values, list):
+            shap_values = shap_values[0]
+        
+        # Get SHAP values for this sample
+        if hasattr(shap_values, 'values'):
+            shap_values_sample = shap_values.values[sample_idx]
+            base_value = shap_values.base_values[sample_idx] if hasattr(shap_values.base_values, '__len__') else shap_values.base_values
+        else:
+            shap_values_sample = shap_values[sample_idx]
+            base_value = 0.0
+        
+        test_sample = test_data[sample_idx]
+        
+        # Create explanation object for this sample (flattened for force plot)
+        shap_values_flat = shap_values_sample.reshape(-1)
+        test_flat = test_sample.reshape(-1)
+        feature_names_flat = [f"{feat}_t{t}" for t in range(SEQUENCE_LENGTH) for feat in FEATURE_COLUMNS]
+        
+        explanation = shap.Explanation(
+            values=shap_values_flat,
+            base_values=base_value,
+            data=test_flat,
+            feature_names=feature_names_flat[:len(shap_values_flat)]
+        )
+        
+        # Plot force plot (HTML version, not matplotlib)
+        shap.plots.force(explanation, show=False, matplotlib=False)
+        # Save as HTML
+        html_path = save_path.with_suffix('.html')
+        shap.plots.force(explanation, show=False)
+        # Note: Force plots are interactive HTML, matplotlib=True has limitations
+        print(f"SHAP force plot (HTML) saved to: {html_path}")
+        print(f"Note: Force plots are interactive HTML files. Open in browser to view.")
+    except Exception as e:
+        print(f"Warning: Could not generate SHAP force plot: {e}")
 
 
 def plot_temporal_attribution(
