@@ -1,0 +1,25 @@
+{
+  "metrics": {
+    "AUC": 0.0,
+    "Accuracy": 1.0,
+    "Precision": 1.0,
+    "Recall": 1.0,
+    "F1": 1.0
+  },
+  "confusion_matrix": [
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      2
+    ]
+  ],
+  "num_samples": 2,
+  "model_config": {
+    "model_type": "lstm",
+    "input_dim": 6,
+    "sequence_length": 12
+  }
+}

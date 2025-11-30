@@ -1,0 +1,29 @@
+{
+  "model_checkpoint": "LSTM/models/checkpoints/best_model.pt",
+  "csv_path": "logs/vehicles_speed_log.csv",
+  "threshold": 0.5,
+  "total_sequences": 2,
+  "accuracy": 1.0,
+  "predictions": [
+    {
+      "prediction": "STOP",
+      "probability_stop": 0.9992778897285461,
+      "probability_go": 0.0007221102714538574,
+      "confidence": 0.9992778897285461,
+      "threshold": 0.5,
+      "sequence_id": 0,
+      "true_label": "STOP",
+      "correct": true
+    },
+    {
+      "prediction": "STOP",
+      "probability_stop": 0.9990111589431763,
+      "probability_go": 0.0009888410568237305,
+      "confidence": 0.9990111589431763,
+      "threshold": 0.5,
+      "sequence_id": 1,
+      "true_label": "STOP",
+      "correct": true
+    }
+  ]
+}

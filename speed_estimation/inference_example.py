@@ -64,7 +64,7 @@ PIXELS_TO_METERS = 1.0  # Default: 1 pixel = 1 meter (user should calibrate)
 # Traffic light ROI coordinates (x1, y1, x2, y2)
 # Default values - user should provide their coordinates
 # TRAFFIC_LIGHT_ROI = np.array([[183, 100], [224, 100], [223, 120], [182, 120]]) #old vid
-TRAFFIC_LIGHT_ROI = np.array([[500, 50], [520, 50], [520, 55], [500, 55]]) 
+TRAFFIC_LIGHT_ROI = np.array([[500, 50], [518, 50], [518, 55], [500, 55]]) 
 
 # Stop line coordinates (horizontal line: [x1, y1], [x2, y2])
 STOP_LINE = np.array(
