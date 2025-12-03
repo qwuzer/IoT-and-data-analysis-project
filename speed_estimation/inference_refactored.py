@@ -162,9 +162,12 @@ class ViewTransformer:
 
 class TrafficLightChangeDetector:
     """
-    Detects traffic light states by monitoring intensity changes within
-    three dedicated ROIs (red, yellow, green). A light is considered "on"
+    Detects traffic light states by monitoring intensity changes (not color-based).
+    Uses grayscale intensity change detection: a light is considered "on"
     when its ROI becomes significantly brighter than its recent baseline.
+    
+    Spatial logic: If both red and yellow are detected, yellow prevails if it's
+    positioned more to the right (horizontal) or lower (vertical) than red.
     """
 
     def __init__(
@@ -212,23 +215,32 @@ class TrafficLightChangeDetector:
             return False, False, False, "N/A", {}
 
         statuses = {}
+        intensities = {}
+        
+        # First pass: detect intensity changes for all segments
         for name, box in self.segment_boxes.items():
             region = self._extract_region(frame, box)
             if region is None or region.size == 0:
                 statuses[name] = False
+                intensities[name] = 0.0
                 continue
 
-            hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-            intensity = float(np.mean(hsv_region[..., 2]))
+            # Convert to grayscale for intensity-based change detection
+            gray_region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+            intensity = float(np.mean(gray_region))
+            intensities[name] = intensity
+            
             prev_intensity = self.previous_intensity.get(name)
             off_reference = self.off_reference.get(name)
             if off_reference is None:
                 off_reference = intensity
 
+            # Calculate intensity change from previous frame and from reference
             delta_prev = 0.0 if prev_intensity is None else intensity - prev_intensity
             delta_reference = intensity - off_reference
             state = self.states.get(name, False)
 
+            # Turn ON: if intensity increased significantly (change detection)
             if not state:
                 if (
                     (delta_prev >= self.on_change_threshold or delta_reference >= self.on_change_threshold)
@@ -236,12 +248,14 @@ class TrafficLightChangeDetector:
                 ):
                     state = True
             else:
+                # Turn OFF: if intensity decreased significantly
                 if (
                     (-delta_prev) >= self.off_change_threshold
                     or intensity < off_reference + self.off_change_threshold
                 ):
                     state = False
 
+            # Update reference when off (adaptive baseline)
             if not state:
                 off_reference = (off_reference * 0.9) + (intensity * 0.1)
 
@@ -250,10 +264,41 @@ class TrafficLightChangeDetector:
             self.states[name] = state
             statuses[name] = state
 
+        # Second pass: Apply spatial logic for red/yellow precedence
         red_on = statuses.get("red", False)
         yellow_on = statuses.get("yellow", False)
         green_on = statuses.get("green", False)
+        
+        # Spatial logic: If both red and yellow are on, check their positions
+        # Yellow should prevail if it's more to the right (horizontal) or lower (vertical)
+        if red_on and yellow_on:
+            red_box = self.segment_boxes.get("red")
+            yellow_box = self.segment_boxes.get("yellow")
+            
+            if red_box and yellow_box:
+                # Get center x-coordinate for horizontal comparison
+                red_center_x = (red_box[0] + red_box[2]) / 2
+                yellow_center_x = (yellow_box[0] + yellow_box[2]) / 2
+                
+                # Get center y-coordinate for vertical comparison
+                red_center_y = (red_box[1] + red_box[3]) / 2
+                yellow_center_y = (yellow_box[1] + yellow_box[3]) / 2
+                
+                # Determine if traffic light is horizontal or vertical
+                red_width = red_box[2] - red_box[0]
+                red_height = red_box[3] - red_box[1]
+                is_horizontal = red_width > red_height
+                
+                if is_horizontal:
+                    # Horizontal traffic light: yellow prevails if it's more to the right
+                    if yellow_center_x > red_center_x:
+                        red_on = False  # Yellow takes precedence
+                else:
+                    # Vertical traffic light: yellow prevails if it's lower (more down)
+                    if yellow_center_y > red_center_y:
+                        red_on = False  # Yellow takes precedence
 
+        # Determine final status text
         if red_on:
             status_text = "RED"
         elif yellow_on:
@@ -884,7 +929,7 @@ if __name__ == "__main__":
                     for name, (x1, y1, x2, y2) in traffic_light_segments.items():
                         active = segment_states.get(name, False)
                         color = color_lookup.get(name, (200, 200, 200)) if active else (120, 120, 120)
-                        thickness_value = 2 if active else 1
+                        thickness_value = 1
                         cv2.rectangle(
                             annotated_frame,
                             (int(x1), int(y1)),
