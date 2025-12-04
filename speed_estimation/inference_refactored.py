@@ -64,18 +64,19 @@ PIXELS_TO_METERS = 1.0  # Default: 1 pixel = 1 meter (user should calibrate)
 # Traffic light ROI coordinates (x1, y1, x2, y2)
 # Default values - user should provide their coordinates
 # TRAFFIC_LIGHT_ROI = np.array([[183, 100], [224, 100], [223, 120], [182, 120]]) #old vid
-TRAFFIC_LIGHT_ROI = np.array([[500, 50], [518, 50], [518, 55], [500, 55]]) 
+TRAFFIC_LIGHT_ROI = np.array([[500, 50], [520, 50], [520, 55], [500, 55]]) 
 
 # Stop line coordinates (horizontal line: [x1, y1], [x2, y2])
 STOP_LINE = np.array(
     [[420, 101], [536, 101]]
 )
-TRAFFIC_LIGHT_SEGMENT_ORDER = ("red", "yellow", "green")
+TRAFFIC_LIGHT_SEGMENT_ORDER = ("red", "yellow", "green", "unused")
 
 
 def derive_segment_boxes(roi_coords):
     """
-    Split a polygon/rectangle ROI into three segments (red, yellow, green).
+    Split a polygon/rectangle ROI into four segments.
+    Leftmost segment is red, second from left is yellow.
     Returns a dict mapping segment names to rectangular boxes (x1, y1, x2, y2).
     """
     if roi_coords is None:
@@ -115,8 +116,8 @@ def derive_segment_boxes(roi_coords):
 
 def parse_segment_overrides(segment_string):
     """
-    Parse a user supplied string with three boxes:
-    "x1,y1,x2,y2;x1,y1,x2,y2;x1,y1,x2,y2" in red-yellow-green order.
+    Parse a user supplied string with four boxes:
+    "x1,y1,x2,y2;x1,y1,x2,y2;x1,y1,x2,y2;x1,y1,x2,y2" in red-yellow-green-unused order.
     """
     entries = [seg.strip() for seg in segment_string.split(";") if seg.strip()]
     if len(entries) != len(TRAFFIC_LIGHT_SEGMENT_ORDER):
@@ -176,11 +177,18 @@ class TrafficLightChangeDetector:
         on_change_threshold=12.0,
         off_change_threshold=6.0,
         min_intensity=60.0,
+        initial_on_threshold=80.0,
+        initialization_frames=10,
     ):
         self.segment_boxes = segment_boxes or {}
         self.on_change_threshold = on_change_threshold
         self.off_change_threshold = off_change_threshold
         self.min_intensity = min_intensity
+        self.initial_on_threshold = initial_on_threshold  # Threshold for detecting lights already on at start
+        self.initialization_frames = initialization_frames
+        self.frame_count = 0
+        self.initialization_complete = False
+        self.initial_intensities = []  # Store intensities during initialization
         self.previous_intensity = {name: None for name in self.segment_boxes}
         self.off_reference = {name: None for name in self.segment_boxes}
         self.states = {name: False for name in self.segment_boxes}
@@ -216,28 +224,48 @@ class TrafficLightChangeDetector:
 
         statuses = {}
         intensities = {}
+        current_frame_intensities = {}
+        intensity_deltas = {}  # Track intensity changes for red/yellow comparison
         
-        # First pass: detect intensity changes for all segments
+        # First pass: detect intensity changes for all segments (skip "unused")
         for name, box in self.segment_boxes.items():
+            if name == "unused":
+                continue
             region = self._extract_region(frame, box)
             if region is None or region.size == 0:
                 statuses[name] = False
                 intensities[name] = 0.0
+                current_frame_intensities[name] = 0.0
+                intensity_deltas[name] = 0.0
                 continue
 
             # Convert to grayscale for intensity-based change detection
             gray_region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
             intensity = float(np.mean(gray_region))
             intensities[name] = intensity
+            current_frame_intensities[name] = intensity
             
             prev_intensity = self.previous_intensity.get(name)
             off_reference = self.off_reference.get(name)
+            
+            # During initialization phase: collect intensity samples
+            if not self.initialization_complete:
+                if off_reference is None:
+                    off_reference = intensity
+                self.off_reference[name] = off_reference
+                intensity_deltas[name] = 0.0
+                continue  # Skip state detection during initialization
+            
             if off_reference is None:
                 off_reference = intensity
 
             # Calculate intensity change from previous frame and from reference
             delta_prev = 0.0 if prev_intensity is None else intensity - prev_intensity
             delta_reference = intensity - off_reference
+            # Store the maximum positive change for comparison (positive = light turning on)
+            # We care about increases, not decreases, when comparing which light is more active
+            max_positive_delta = max(delta_prev, delta_reference, 0.0)
+            intensity_deltas[name] = max_positive_delta
             state = self.states.get(name, False)
 
             # Turn ON: if intensity increased significantly (change detection)
@@ -263,40 +291,95 @@ class TrafficLightChangeDetector:
             self.off_reference[name] = off_reference
             self.states[name] = state
             statuses[name] = state
+        
+        # Handle initialization phase: detect lights that are already on
+        if not self.initialization_complete:
+            self.initial_intensities.append(current_frame_intensities.copy())
+            self.frame_count += 1
+            
+            if self.frame_count >= self.initialization_frames:
+                # Calculate average intensities during initialization
+                avg_intensities = {}
+                for name in current_frame_intensities.keys():
+                    if name == "unused":
+                        continue
+                    samples = [frame_data.get(name, 0.0) for frame_data in self.initial_intensities if name in frame_data]
+                    if samples:
+                        avg_intensities[name] = sum(samples) / len(samples)
+                
+                # Detect lights that are already on based on absolute intensity
+                for name, avg_intensity in avg_intensities.items():
+                    if avg_intensity >= self.initial_on_threshold:
+                        self.states[name] = True
+                        statuses[name] = True
+                        # Set off_reference to a lower value (estimated "off" state) 
+                        # to enable change detection when it turns off later
+                        estimated_off_intensity = max(avg_intensity - self.on_change_threshold * 2, self.min_intensity - 10)
+                        self.off_reference[name] = estimated_off_intensity
+                        self.previous_intensity[name] = avg_intensity
+                    else:
+                        self.states[name] = False
+                        statuses[name] = False
+                        # For lights that are off, use the average as the off_reference
+                        self.off_reference[name] = avg_intensity
+                        self.previous_intensity[name] = avg_intensity
+                
+                self.initialization_complete = True
+                # Return the detected states after initialization
+                red_on = statuses.get("red", False)
+                yellow_on = statuses.get("yellow", False)
+                green_on = statuses.get("green", False)
+                
+                # Apply change-based precedence logic (use intensity deltas from initialization)
+                if red_on and yellow_on:
+                    # During initialization, compare absolute intensities
+                    red_intensity = avg_intensities.get("red", 0.0)
+                    yellow_intensity = avg_intensities.get("yellow", 0.0)
+                    
+                    # Use the segment with higher intensity (more active)
+                    if yellow_intensity > red_intensity:
+                        red_on = False
+                    else:
+                        yellow_on = False
+                
+                if red_on:
+                    status_text = "RED"
+                elif yellow_on:
+                    status_text = "YELLOW"
+                elif green_on:
+                    status_text = "GREEN"
+                else:
+                    status_text = "OFF"
+                
+                return red_on, yellow_on, green_on, status_text, statuses
+            else:
+                # Still initializing, return all False
+                return False, False, False, "OFF", {}
 
-        # Second pass: Apply spatial logic for red/yellow precedence
+        # Second pass: Apply change-based logic for red/yellow precedence
         red_on = statuses.get("red", False)
         yellow_on = statuses.get("yellow", False)
         green_on = statuses.get("green", False)
         
-        # Spatial logic: If both red and yellow are on, check their positions
-        # Yellow should prevail if it's more to the right (horizontal) or lower (vertical)
+        # If both red and yellow are detected, use the one with more significant intensity changes
         if red_on and yellow_on:
-            red_box = self.segment_boxes.get("red")
-            yellow_box = self.segment_boxes.get("yellow")
+            red_delta = intensity_deltas.get("red", 0.0)
+            yellow_delta = intensity_deltas.get("yellow", 0.0)
+            red_intensity = intensities.get("red", 0.0)
+            yellow_intensity = intensities.get("yellow", 0.0)
             
-            if red_box and yellow_box:
-                # Get center x-coordinate for horizontal comparison
-                red_center_x = (red_box[0] + red_box[2]) / 2
-                yellow_center_x = (yellow_box[0] + yellow_box[2]) / 2
-                
-                # Get center y-coordinate for vertical comparison
-                red_center_y = (red_box[1] + red_box[3]) / 2
-                yellow_center_y = (yellow_box[1] + yellow_box[3]) / 2
-                
-                # Determine if traffic light is horizontal or vertical
-                red_width = red_box[2] - red_box[0]
-                red_height = red_box[3] - red_box[1]
-                is_horizontal = red_width > red_height
-                
-                if is_horizontal:
-                    # Horizontal traffic light: yellow prevails if it's more to the right
-                    if yellow_center_x > red_center_x:
-                        red_on = False  # Yellow takes precedence
-                else:
-                    # Vertical traffic light: yellow prevails if it's lower (more down)
-                    if yellow_center_y > red_center_y:
-                        red_on = False  # Yellow takes precedence
+            # Combine change magnitude and current intensity for a more robust comparison
+            # Weight: 60% change delta, 40% current intensity (normalized)
+            red_score = red_delta * 0.6 + (red_intensity / 255.0) * 100.0 * 0.4
+            yellow_score = yellow_delta * 0.6 + (yellow_intensity / 255.0) * 100.0 * 0.4
+            
+            # Use the segment with higher score (more activity)
+            if yellow_score > red_score:
+                # Yellow has more significant changes/activity, use yellow
+                red_on = False
+            else:
+                # Red has more significant changes/activity (or equal), use red
+                yellow_on = False
 
         # Determine final status text
         if red_on:
@@ -558,6 +641,18 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         help="Minimum HSV-V intensity to consider a traffic light illuminated.",
     )
+    parser.add_argument(
+        "--initial_on_threshold",
+        default=80.0,
+        type=float,
+        help="Absolute intensity threshold for detecting lights already on at video start (default: 80.0).",
+    )
+    parser.add_argument(
+        "--initialization_frames",
+        default=10,
+        type=int,
+        help="Number of frames to use for initial state detection (default: 10).",
+    )
 
     return parser.parse_args()
 
@@ -673,6 +768,8 @@ if __name__ == "__main__":
         on_change_threshold=args.segment_change_threshold,
         off_change_threshold=args.segment_release_threshold,
         min_intensity=args.segment_min_intensity,
+        initial_on_threshold=args.initial_on_threshold,
+        initialization_frames=args.initialization_frames,
     )
 
     csv_rows = []
