@@ -39,10 +39,25 @@ def identify_yellow_onset_frames(df: pd.DataFrame) -> Dict[int, int]:
         Dictionary mapping tracker_id to frame_index of yellow onset (global yellow start)
     """
     # Find the global yellow onset frame (first frame where yellow starts in entire video)
-    global_yellow_frames = df[
-        (df['yellow_light'] == True) | 
-        (df['traffic_light_status'] == 'YELLOW')
-    ]['frame_index']
+    # Handle different column name formats from inference_refactored.py
+    yellow_conditions = []
+    
+    if 'yellow_light' in df.columns:
+        yellow_conditions.append(df['yellow_light'] == True)
+    if 'traffic_light_status' in df.columns:
+        yellow_conditions.append(df['traffic_light_status'] == 'YELLOW')
+    if 'phase_state' in df.columns:
+        yellow_conditions.append(df['phase_state'] == 'yellow')
+    
+    if not yellow_conditions:
+        return {}
+    
+    # Combine conditions with OR
+    combined_condition = yellow_conditions[0]
+    for cond in yellow_conditions[1:]:
+        combined_condition = combined_condition | cond
+    
+    global_yellow_frames = df[combined_condition]['frame_index']
     
     if global_yellow_frames.empty:
         return {}

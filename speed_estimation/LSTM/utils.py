@@ -43,12 +43,109 @@ def load_csv_data(csv_path: str) -> pd.DataFrame:
     
     df = pd.read_csv(csv_path)
     
-    # Check for required columns
-    missing_cols = set(CSV_COLUMNS) - set(df.columns)
+    # Map column names from inference_refactored.py format to expected format
+    column_mapping = {
+        'distance_to_stop_line_m': 'distance_to_stop_line',
+        'distance_to_front_vehicle_m': 'distance_to_front_vehicle',
+        'ttc_s': 'ttc',
+    }
+    
+    # Rename columns if they exist
+    df = df.rename(columns=column_mapping)
+    
+    # Check for required columns (allow some flexibility)
+    required_cols = ['frame_index', 'tracker_id', 'yellow_light_decision']
+    missing_cols = set(required_cols) - set(df.columns)
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
     
     return df
+
+
+def load_multiple_csv_files(csv_paths: List[str], make_tracker_ids_unique: bool = True) -> pd.DataFrame:
+    """
+    Load and combine multiple CSV files into a single DataFrame.
+    
+    Args:
+        csv_paths: List of paths to CSV files
+        make_tracker_ids_unique: If True, make tracker_ids unique across files by adding offset
+        
+    Returns:
+        Combined DataFrame with data from all CSV files
+    """
+    if not csv_paths:
+        raise ValueError("No CSV file paths provided")
+    
+    dataframes = []
+    max_tracker_id = 0
+    
+    for idx, csv_path in enumerate(csv_paths):
+        csv_path = Path(csv_path)
+        if not csv_path.exists():
+            print(f"Warning: CSV file not found, skipping: {csv_path}")
+            continue
+        
+        try:
+            df = load_csv_data(str(csv_path))
+            
+            # Make tracker_ids unique across files if requested
+            if make_tracker_ids_unique:
+                # Add a large offset to tracker_ids to ensure uniqueness
+                # Use file index * 100000 to provide plenty of room
+                offset = idx * 100000
+                df['tracker_id'] = df['tracker_id'] + offset
+                max_tracker_id = max(max_tracker_id, df['tracker_id'].max())
+            
+            # Add source file identifier for tracking
+            df['source_file'] = csv_path.stem
+            
+            dataframes.append(df)
+            print(f"Loaded {len(df)} rows from {csv_path.name} ({len(df['tracker_id'].unique())} unique vehicles)")
+            
+        except Exception as e:
+            print(f"Error loading {csv_path}: {e}")
+            continue
+    
+    if not dataframes:
+        raise ValueError("No valid CSV files could be loaded")
+    
+    # Combine all dataframes
+    combined_df = pd.concat(dataframes, ignore_index=True)
+    
+    print(f"\nCombined dataset:")
+    print(f"  Total rows: {len(combined_df)}")
+    print(f"  Total unique vehicles: {len(combined_df['tracker_id'].unique())}")
+    print(f"  Source files: {len(combined_df['source_file'].unique())}")
+    
+    return combined_df
+
+
+def load_csv_files_from_directory(directory: str, pattern: str = "*_speed_log*.csv", make_tracker_ids_unique: bool = True) -> pd.DataFrame:
+    """
+    Load all CSV files matching a pattern from a directory.
+    
+    Args:
+        directory: Path to directory containing CSV files
+        pattern: Glob pattern to match CSV files (default: "*_speed_log*.csv")
+        make_tracker_ids_unique: If True, make tracker_ids unique across files
+        
+    Returns:
+        Combined DataFrame with data from all matching CSV files
+    """
+    directory = Path(directory)
+    if not directory.exists():
+        raise FileNotFoundError(f"Directory not found: {directory}")
+    
+    csv_files = sorted(directory.glob(pattern))
+    
+    if not csv_files:
+        raise ValueError(f"No CSV files found matching pattern '{pattern}' in {directory}")
+    
+    print(f"Found {len(csv_files)} CSV files matching pattern '{pattern}':")
+    for csv_file in csv_files:
+        print(f"  - {csv_file.name}")
+    
+    return load_multiple_csv_files([str(f) for f in csv_files], make_tracker_ids_unique=make_tracker_ids_unique)
 
 
 def filter_valid_labels(df: pd.DataFrame) -> pd.DataFrame:
@@ -244,8 +341,20 @@ def get_feature_array(df: pd.DataFrame) -> np.ndarray:
     Returns:
         Feature array of shape (n_samples, feature_dim)
     """
-    # Handle missing values: fill with 0 for numeric columns
-    feature_df = df[FEATURE_COLUMNS].copy()
+    # Create a copy to avoid modifying original
+    feature_df = pd.DataFrame(index=df.index)
+    
+    # Extract features, handling missing columns
+    for col in FEATURE_COLUMNS:
+        if col in df.columns:
+            feature_df[col] = df[col]
+        else:
+            # Column missing - fill with default value
+            if col == 'class_id':
+                feature_df[col] = 2  # Default to car
+            else:
+                feature_df[col] = 0.0
+            print(f"Warning: Feature column '{col}' not found in data, using default value")
     
     # Fill NaN values
     for col in FEATURE_COLUMNS:
@@ -255,7 +364,7 @@ def get_feature_array(df: pd.DataFrame) -> np.ndarray:
             else:
                 feature_df[col] = feature_df[col].fillna(0.0)
     
-    features = feature_df.values.astype(np.float32)
+    features = feature_df[FEATURE_COLUMNS].values.astype(np.float32)
     
     return features
 

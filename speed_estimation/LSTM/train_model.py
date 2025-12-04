@@ -8,6 +8,7 @@ import argparse
 import os
 import json
 from pathlib import Path
+from typing import List
 import numpy as np
 import torch
 import torch.nn as nn
@@ -31,6 +32,7 @@ from .config import (
     SCHEDULER_FACTOR,
     TRAIN_VAL_SPLIT,
     SPLIT_BY_DATE,
+    SPLIT_BY_SOURCE_FILE,
     MODEL_DIR,
     MODEL_CHECKPOINT_DIR,
     RANDOM_SEED,
@@ -39,7 +41,7 @@ from .config import (
     FEATURE_DIM
 )
 from .sequence_builder import build_sequences_from_csv, build_sequences_from_dataframe, get_sequence_statistics
-from .utils import load_csv_data, filter_valid_labels, split_by_date
+from .utils import load_csv_data, load_multiple_csv_files, load_csv_files_from_directory, filter_valid_labels, split_by_date
 from .model_architecture import create_model, count_parameters, print_model_summary
 
 warnings.filterwarnings('ignore')
@@ -203,7 +205,10 @@ def save_checkpoint(
 
 
 def train(
-    csv_path: str,
+    csv_path: str = None,
+    csv_paths: List[str] = None,
+    csv_directory: str = None,
+    csv_pattern: str = "*_speed_log*.csv",
     model_type: str = MODEL_TYPE,
     batch_size: int = BATCH_SIZE,
     learning_rate: float = LEARNING_RATE,
@@ -215,7 +220,10 @@ def train(
     Main training function.
     
     Args:
-        csv_path: Path to CSV file with vehicle data
+        csv_path: Path to single CSV file with vehicle data (mutually exclusive with csv_paths/csv_directory)
+        csv_paths: List of paths to multiple CSV files (mutually exclusive with csv_path/csv_directory)
+        csv_directory: Directory containing CSV files to load (mutually exclusive with csv_path/csv_paths)
+        csv_pattern: Glob pattern for CSV files when using csv_directory (default: "*_speed_log*.csv")
         model_type: Type of model ('lstm' or 'cnn')
         batch_size: Batch size for training
         learning_rate: Learning rate
@@ -236,7 +244,20 @@ def train(
     
     # Load and prepare data
     print("Loading data...")
-    df = load_csv_data(csv_path)
+    
+    # Determine which input method to use
+    input_count = sum([csv_path is not None, csv_paths is not None, csv_directory is not None])
+    if input_count == 0:
+        raise ValueError("Must provide one of: csv_path, csv_paths, or csv_directory")
+    if input_count > 1:
+        raise ValueError("Can only provide one of: csv_path, csv_paths, or csv_directory")
+    
+    if csv_directory:
+        df = load_csv_files_from_directory(csv_directory, pattern=csv_pattern, make_tracker_ids_unique=True)
+    elif csv_paths:
+        df = load_multiple_csv_files(csv_paths, make_tracker_ids_unique=True)
+    else:
+        df = load_csv_data(csv_path)
     
     # First, identify vehicles with valid labels
     df_valid_labels = filter_valid_labels(df)
@@ -244,9 +265,36 @@ def train(
     
     print(f"Found {len(vehicles_with_labels)} vehicles with valid labels")
     
+    # Check if we have multiple source files (indicates multiple CSV files were combined)
+    has_multiple_sources = 'source_file' in df.columns and df['source_file'].nunique() > 1
+    
     # Split vehicles (not rows) into train/validation
-    if SPLIT_BY_DATE:
-        print("Splitting vehicles by date...")
+    if has_multiple_sources and SPLIT_BY_SOURCE_FILE:
+        # Split by source file to avoid data leakage between different recording sessions
+        print("Splitting by source file to avoid data leakage...")
+        source_files = sorted(df['source_file'].unique())
+        split_idx = int(len(source_files) * TRAIN_VAL_SPLIT)
+        
+        train_sources = set(source_files[:split_idx])
+        val_sources = set(source_files[split_idx:])
+        
+        print(f"Training sources ({len(train_sources)}): {sorted(train_sources)}")
+        print(f"Validation sources ({len(val_sources)}): {sorted(val_sources)}")
+        
+        # Get vehicles from each source
+        train_vehicles = set(df[df['source_file'].isin(train_sources)]['tracker_id'].unique())
+        val_vehicles = set(df[df['source_file'].isin(val_sources)]['tracker_id'].unique())
+        
+        # Only use vehicles with valid labels
+        train_vehicles = train_vehicles & set(vehicles_with_labels)
+        val_vehicles = val_vehicles & set(vehicles_with_labels)
+        
+        # Split dataframes
+        train_df = df[df['tracker_id'].isin(train_vehicles)].copy()
+        val_df = df[df['tracker_id'].isin(val_vehicles)].copy()
+        
+    elif SPLIT_BY_DATE:
+        print("Splitting vehicles by date (frame_index)...")
         # Get first frame for each vehicle to determine split
         vehicle_first_frames = {}
         for tracker_id in vehicles_with_labels:
@@ -265,6 +313,7 @@ def train(
         val_df = df[df['tracker_id'].isin(val_vehicles)].copy()
     else:
         # Random split (fallback)
+        print("Splitting vehicles randomly...")
         from sklearn.model_selection import train_test_split
         train_vehicles, val_vehicles = train_test_split(
             list(vehicles_with_labels),
@@ -274,8 +323,26 @@ def train(
         train_df = df[df['tracker_id'].isin(train_vehicles)].copy()
         val_df = df[df['tracker_id'].isin(val_vehicles)].copy()
     
-    print(f"Training vehicles: {len(train_vehicles) if SPLIT_BY_DATE else len(train_vehicles)}, Training rows: {len(train_df)}")
-    print(f"Validation vehicles: {len(val_vehicles) if SPLIT_BY_DATE else len(val_vehicles)}, Validation rows: {len(val_df)}")
+    print(f"\nSplit Summary:")
+    print(f"  Training vehicles: {len(train_vehicles)}, Training rows: {len(train_df)}")
+    print(f"  Validation vehicles: {len(val_vehicles)}, Validation rows: {len(val_df)}")
+    
+    # Verify no overlap between train and validation vehicles
+    overlap = train_vehicles & val_vehicles
+    if overlap:
+        print(f"  WARNING: {len(overlap)} vehicles appear in both train and validation sets!")
+    else:
+        print(f"  ✓ No overlap between train and validation vehicles")
+    
+    # If using source files, verify no overlap
+    if has_multiple_sources and 'source_file' in train_df.columns and 'source_file' in val_df.columns:
+        train_sources = set(train_df['source_file'].unique())
+        val_sources = set(val_df['source_file'].unique())
+        source_overlap = train_sources & val_sources
+        if source_overlap:
+            print(f"  WARNING: {len(source_overlap)} source files appear in both train and validation sets!")
+        else:
+            print(f"  ✓ No overlap between train and validation source files")
     
     # Build sequences
     print("Building training sequences...")
@@ -460,11 +527,30 @@ def train(
 
 def main():
     parser = argparse.ArgumentParser(description='Train Dilemma Zone Prediction Model')
-    parser.add_argument(
+    
+    # Input data arguments (mutually exclusive)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         '--csv_path',
         type=str,
-        required=True,
-        help='Path to CSV file with vehicle data'
+        help='Path to single CSV file with vehicle data'
+    )
+    input_group.add_argument(
+        '--csv_paths',
+        type=str,
+        nargs='+',
+        help='List of paths to multiple CSV files with vehicle data'
+    )
+    input_group.add_argument(
+        '--csv_directory',
+        type=str,
+        help='Directory containing CSV files to load'
+    )
+    parser.add_argument(
+        '--csv_pattern',
+        type=str,
+        default='*_speed_log*.csv',
+        help='Glob pattern for CSV files when using --csv_directory (default: "*_speed_log*.csv")'
     )
     parser.add_argument(
         '--model_type',
@@ -508,6 +594,9 @@ def main():
     
     train(
         csv_path=args.csv_path,
+        csv_paths=args.csv_paths,
+        csv_directory=args.csv_directory,
+        csv_pattern=args.csv_pattern,
         model_type=args.model_type.lower(),
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,

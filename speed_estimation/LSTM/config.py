@@ -87,6 +87,7 @@ SCHEDULER_FACTOR = 0.5
 # Train/Validation split
 TRAIN_VAL_SPLIT = 0.8
 SPLIT_BY_DATE = True  # Split by date instead of random
+SPLIT_BY_SOURCE_FILE = True  # When using multiple CSV files, split by source file to avoid data leakage
 
 # Data normalization
 NORMALIZE_FEATURES = True
