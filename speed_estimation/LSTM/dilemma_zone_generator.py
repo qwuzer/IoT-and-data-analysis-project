@@ -207,7 +207,8 @@ def plot_dilemma_zone_heatmap(
         levels=[dz_boundary[0], dz_boundary[1]],
         colors='red', linewidths=2.5, linestyles='-'
     )
-    plt.clabel(dz_contour, inline=True, fontsize=11, fmt='DZ: %.2f', colors='red', fontweight='bold')
+    # Note: fontweight not supported in all matplotlib versions, using fontsize for emphasis
+    plt.clabel(dz_contour, inline=True, fontsize=12, fmt='DZ: %.2f', colors='red')
     
     plt.xlabel('Speed (m/s)', fontsize=12, fontweight='bold')
     plt.ylabel('Distance to Stop Line (m)', fontsize=12, fontweight='bold')
@@ -364,8 +365,28 @@ def main():
         default=DZ_GRID_RESOLUTION,
         help='Grid resolution (default: 50)'
     )
+    parser.add_argument(
+        '--speed_range',
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=('MIN', 'MAX'),
+        help='Speed range in m/s (default: 0 25). Example: --speed_range 0 30'
+    )
+    parser.add_argument(
+        '--distance_range',
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=('MIN', 'MAX'),
+        help='Distance range in meters (default: 0 60). Example: --distance_range 0 80'
+    )
     
     args = parser.parse_args()
+    
+    # Set speed and distance ranges
+    speed_range = tuple(args.speed_range) if args.speed_range else DZ_SPEED_RANGE
+    distance_range = tuple(args.distance_range) if args.distance_range else DZ_DISTANCE_RANGE
     
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -392,8 +413,13 @@ def main():
     # Generate dilemma zones
     if args.vehicle_type is None or args.vehicle_type == 'all':
         generate_dilemma_zones_for_all_vehicle_types(
-            model, output_dir=args.output_dir, device=device,
-            train_losses=train_losses, val_losses=val_losses
+            model, 
+            speed_range=speed_range,
+            distance_range=distance_range,
+            output_dir=args.output_dir, 
+            device=device,
+            train_losses=train_losses, 
+            val_losses=val_losses
         )
     else:
         # Generate for specific vehicle type
@@ -407,7 +433,11 @@ def main():
             raise ValueError(f"Unknown vehicle type: {args.vehicle_type}")
         
         speed_grid, distance_grid, probability_grid = generate_dilemma_zone_grid(
-            model, vehicle_class_id=class_id, device=device,
+            model, 
+            speed_range=speed_range,
+            distance_range=distance_range,
+            vehicle_class_id=class_id, 
+            device=device,
             grid_resolution=args.grid_resolution
         )
         
