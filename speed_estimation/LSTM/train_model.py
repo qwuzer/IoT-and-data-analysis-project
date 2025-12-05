@@ -450,6 +450,9 @@ def train(
     val_losses = []
     patience_counter = 0
     
+    # Initialize metadata (will be updated each epoch)
+    # Note: train_stats and val_stats are already computed above
+    
     for epoch in range(start_epoch, num_epochs):
         # Train
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
@@ -483,6 +486,27 @@ def train(
             train_norm_params, checkpoint_path, is_best=is_best
         )
         
+        # Save/update training metadata after each epoch (so it's available even if training is interrupted)
+        metadata = {
+            'train_losses': train_losses,
+            'val_losses': val_losses,
+            'best_val_loss': best_val_loss,
+            'num_epochs_trained': len(train_losses),
+            'train_stats': train_stats,
+            'val_stats': val_stats,
+            'normalizer_params': train_norm_params,
+            'model_config': {
+                'model_type': model_type,
+                'input_dim': FEATURE_DIM,
+                'sequence_length': SEQUENCE_LENGTH,
+                'batch_size': batch_size,
+                'learning_rate': learning_rate
+            }
+        }
+        metadata_path = output_dir / 'training_metadata.json'
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2, default=str)
+        
         # Early stopping
         if patience_counter >= EARLY_STOPPING_PATIENCE:
             print(f"\nEarly stopping triggered after {epoch+1} epochs")
@@ -497,7 +521,7 @@ def train(
         train_norm_params, final_model_path, is_best=False
     )
     
-    # Save training metadata
+    # Save final training metadata (already saved during training, but update with final stats)
     metadata = {
         'train_losses': train_losses,
         'val_losses': val_losses,
@@ -523,6 +547,7 @@ def train(
     print(f"Best validation loss: {best_val_loss:.4f}")
     print(f"Model saved to: {output_dir}")
     print(f"Best model: {output_dir / 'best_model.pt'}")
+    print(f"Training metadata saved to: {metadata_path}")
 
 
 def main():

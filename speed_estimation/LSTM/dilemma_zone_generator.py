@@ -167,11 +167,11 @@ def plot_dilemma_zone_heatmap(
     save_path: Path = None
 ):
     """
-    Plot dilemma zone heatmap with contour lines.
+    Plot dilemma zone heatmap with speed (x-axis) and distance (y-axis).
     
     Args:
-        speed_grid: Speed grid
-        distance_grid: Distance grid
+        speed_grid: Speed grid (x-axis)
+        distance_grid: Distance grid (y-axis)
         probability_grid: Probability grid (P(stop))
         contour_levels: Probability levels for contour lines
         dz_boundary: Dilemma zone boundary (min, max) probability
@@ -180,32 +180,39 @@ def plot_dilemma_zone_heatmap(
     """
     plt.figure(figsize=FIGURE_SIZE)
     
-    # Create heatmap
-    im = plt.contourf(
-        speed_grid, distance_grid, probability_grid,
-        levels=50, cmap='RdYlGn_r', vmin=0, vmax=1
-    )
-    plt.colorbar(im, label='P(STOP)')
+    # Extract unique values for proper heatmap
+    speed_values = np.unique(speed_grid)
+    distance_values = np.unique(distance_grid)
     
-    # Add contour lines
+    # Create proper heatmap using pcolormesh (better for grid data)
+    # Note: probability_grid is indexed as [distance_idx, speed_idx]
+    # We need to transpose it so speed is x-axis and distance is y-axis
+    im = plt.pcolormesh(
+        speed_grid, distance_grid, probability_grid,
+        cmap='RdYlGn_r', vmin=0, vmax=1, shading='auto'
+    )
+    cbar = plt.colorbar(im, label='P(STOP)', aspect=30)
+    cbar.set_label('P(STOP)', fontsize=12, rotation=270, labelpad=20)
+    
+    # Add contour lines for probability levels
     contours = plt.contour(
         speed_grid, distance_grid, probability_grid,
-        levels=contour_levels, colors='black', linewidths=2, linestyles='--'
+        levels=contour_levels, colors='black', linewidths=1.5, linestyles='--', alpha=0.7
     )
-    plt.clabel(contours, inline=True, fontsize=10, fmt='%.1f')
+    plt.clabel(contours, inline=True, fontsize=9, fmt='%.2f', colors='black')
     
-    # Highlight dilemma zone (P ∈ [0.45, 0.55])
+    # Highlight dilemma zone boundary (P ∈ [0.45, 0.55])
     dz_contour = plt.contour(
         speed_grid, distance_grid, probability_grid,
         levels=[dz_boundary[0], dz_boundary[1]],
-        colors='red', linewidths=3, linestyles='-'
+        colors='red', linewidths=2.5, linestyles='-'
     )
-    plt.clabel(dz_contour, inline=True, fontsize=12, fmt='DZ: %.2f', colors='red')
+    plt.clabel(dz_contour, inline=True, fontsize=11, fmt='DZ: %.2f', colors='red', fontweight='bold')
     
-    plt.xlabel('Speed (m/s)')
-    plt.ylabel('Distance to Stop Line (m)')
-    plt.title(f'Dynamic Dilemma Zone: {vehicle_type.upper()}')
-    plt.grid(True, alpha=0.3)
+    plt.xlabel('Speed (m/s)', fontsize=12, fontweight='bold')
+    plt.ylabel('Distance to Stop Line (m)', fontsize=12, fontweight='bold')
+    plt.title(f'Dynamic Dilemma Zone Heatmap: {vehicle_type.upper()}', fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3, linestyle='--')
     plt.tight_layout()
     
     if save_path:
@@ -216,16 +223,58 @@ def plot_dilemma_zone_heatmap(
         plt.show()
 
 
+def plot_training_history_per_vehicle(
+    train_losses: List[float] = None,
+    val_losses: List[float] = None,
+    vehicle_type: str = "all",
+    save_path: Path = None
+):
+    """
+    Plot training history (loss curves) for visualization.
+    
+    Args:
+        train_losses: List of training losses per epoch
+        val_losses: List of validation losses per epoch
+        vehicle_type: Vehicle type name (for title)
+        save_path: Path to save plot
+    """
+    if train_losses is None or val_losses is None:
+        print("Warning: Training history not available, skipping plot.")
+        return
+    
+    plt.figure(figsize=FIGURE_SIZE)
+    
+    epochs = range(1, len(train_losses) + 1)
+    plt.plot(epochs, train_losses, 'b-', label='Training Loss', linewidth=2, marker='o', markersize=4)
+    plt.plot(epochs, val_losses, 'r-', label='Validation Loss', linewidth=2, marker='s', markersize=4)
+    
+    plt.xlabel('Epoch', fontsize=12, fontweight='bold')
+    plt.ylabel('Loss (BCE)', fontsize=12, fontweight='bold')
+    plt.title(f'Training History: {vehicle_type.upper()}', fontsize=14, fontweight='bold')
+    plt.legend(fontsize=11, loc='best')
+    plt.grid(True, alpha=0.3, linestyle='--')
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=DPI, bbox_inches='tight')
+        plt.close()
+        print(f"Training history plot saved to: {save_path}")
+    else:
+        plt.show()
+
+
 def generate_dilemma_zones_for_all_vehicle_types(
     model: DilemmaZoneModel,
     speed_range: Tuple[float, float] = DZ_SPEED_RANGE,
     distance_range: Tuple[float, float] = DZ_DISTANCE_RANGE,
     grid_resolution: int = DZ_GRID_RESOLUTION,
     output_dir: Path = None,
-    device: torch.device = None
+    device: torch.device = None,
+    train_losses: List[float] = None,
+    val_losses: List[float] = None
 ):
     """
-    Generate dilemma zone maps for all vehicle types.
+    Generate dilemma zone maps for all vehicle types with optional training history.
     
     Args:
         model: Trained model
@@ -234,6 +283,8 @@ def generate_dilemma_zones_for_all_vehicle_types(
         grid_resolution: Grid resolution
         output_dir: Output directory
         device: Device to run on
+        train_losses: Training losses for history plot (optional)
+        val_losses: Validation losses for history plot (optional)
     """
     if output_dir is None:
         output_dir = DZ_DIR
@@ -246,6 +297,13 @@ def generate_dilemma_zones_for_all_vehicle_types(
     
     print("Generating dilemma zones for all vehicle types...")
     
+    # Plot training history if available
+    if train_losses and val_losses:
+        history_path = output_dir / 'training_history_all_vehicles.png'
+        plot_training_history_per_vehicle(
+            train_losses, val_losses, vehicle_type="all", save_path=history_path
+        )
+    
     for class_id, vehicle_type in VEHICLE_TYPES.items():
         print(f"\nProcessing {vehicle_type} (class_id={class_id})...")
         
@@ -255,13 +313,20 @@ def generate_dilemma_zones_for_all_vehicle_types(
             vehicle_class_id=class_id, device=device
         )
         
-        # Plot and save
+        # Plot and save heatmap
         save_path = output_dir / f'dilemma_zone_{vehicle_type}.png'
         plot_dilemma_zone_heatmap(
             speed_grid, distance_grid, probability_grid,
             vehicle_type=vehicle_type,
             save_path=save_path
         )
+        
+        # Plot training history per vehicle if available
+        if train_losses and val_losses:
+            history_path = output_dir / f'training_history_{vehicle_type}.png'
+            plot_training_history_per_vehicle(
+                train_losses, val_losses, vehicle_type=vehicle_type, save_path=history_path
+            )
     
     print(f"\nAll dilemma zone maps saved to: {output_dir}")
 
@@ -308,10 +373,27 @@ def main():
     # Load model
     model, _, _ = load_model(args.checkpoint_path, device)
     
+    # Try to load training history if available
+    checkpoint_dir = Path(args.checkpoint_path).parent
+    metadata_path = checkpoint_dir / 'training_metadata.json'
+    
+    train_losses = None
+    val_losses = None
+    
+    if metadata_path.exists():
+        import json
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+            train_losses = metadata.get('train_losses', [])
+            val_losses = metadata.get('val_losses', [])
+            if train_losses and val_losses:
+                print(f"Loaded training history: {len(train_losses)} epochs")
+    
     # Generate dilemma zones
     if args.vehicle_type is None or args.vehicle_type == 'all':
         generate_dilemma_zones_for_all_vehicle_types(
-            model, output_dir=args.output_dir, device=device
+            model, output_dir=args.output_dir, device=device,
+            train_losses=train_losses, val_losses=val_losses
         )
     else:
         # Generate for specific vehicle type
