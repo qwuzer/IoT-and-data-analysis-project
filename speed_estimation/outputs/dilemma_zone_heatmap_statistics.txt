@@ -1,0 +1,29 @@
+================================================================================
+Dilemma Zone Analysis - Summary Statistics
+================================================================================
+
+Total Stop Events: 412
+Total Go Events: 6375
+
+Stop Distance Statistics:
+  Mean: 29.15 m
+  Median: 31.00 m
+  Std: 16.21 m
+  Min: 0.00 m
+  Max: 55.00 m
+  25th percentile: 19.00 m
+  75th percentile: 43.00 m
+
+Stop Speed Statistics:
+  Mean: 8.21 m/s (29.57 km/h)
+  Median: 8.00 m/s (28.80 km/h)
+  Std: 6.65 m/s
+  Min: 1.00 m/s (3.60 km/h)
+  Max: 23.00 m/s (82.80 km/h)
+
+Vehicle Type Breakdown:
+  car: 179 (43.4%)
+  truck: 149 (36.2%)
+  motorcycle: 84 (20.4%)
+
+================================================================================
